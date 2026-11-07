@@ -5,7 +5,7 @@
 用腾讯官方的 **微信 ClawBot（iLink 协议）** 把你的微信接到 **Grok Bot**：
 你在微信里给 ClawBot 发文字 / 语音 / 图片 / 文件 → 这台机器上的转发器长轮询收到 → 打包 POST 到 Grok Bot 的
 **Webhook routine** → agent 处理后调用 `send.py` 回到微信。agent 也可以随时主动推送（提醒、日报），
-推不出去的会排队，等你下次说话时自动补发。
+推不出去的会排队。进程启动之后的新入站，才会补发这一版新写入的队列；旧积压默认留在磁盘上不发。
 
 纯 Python 标准库 + `cryptography`（媒体解密）+ `qrcode`（绑定二维码），没有框架，没有服务器，适合跑在 Grok Bot 的 box 或任何一台常开的 Linux / macOS 机器上。
 
@@ -22,7 +22,7 @@
    │  │ ilink/bot/sendmessage            ┌──────────────── 这台机器 ─────────────────┐
    │  └───────────────────────────────────┤ send.py / outbox.py  ◄── agent 调用回复   │
    │                                      │      ▲ 推送失败 → outbox.json 排队          │
-   ▼ ilink/bot/getupdates (长轮询 ~35s)   │      │ 用户一开口就补发；快到 24h 发 nudge   │
+   ▼ ilink/bot/getupdates (长轮询 ~35s)   │      │ 新入站才补发新队列；旧积压默认不发     │
  ┌──────────────────────────────────┐     │                                            │
  │ forward.py                        │     │ run_forward.sh  (内层：进程退出 5s 后重启) │
  │  main    : 轮询 → 去重 → 下载解密媒体 → pending.json                              │
@@ -72,10 +72,11 @@
   （`last_inbound_ms` 比 trigger 新），直接 **exit 4 (SUPERSEDED)**，什么都不发——新一轮会连同旧消息一起回复。
   这样 batching 的停顿可以设得很短（3s），反应快又不会回答过时的问题。
 - `--app`：主动推送（非回复）加前缀 `[grok bot] `，方便你在微信里区分。
-- 推送被拒（24h 窗口已关）→ 写进 **outbox.json**，**exit 3 (QUEUED)**；转发器看到你下一条消息后 3 秒内按顺序补发
-  （遇到第一条失败就停，下次再试）。
-- 判断成功不能看 HTTP 状态码：iLink 拒绝时也返回 200，要看 JSON 里的 `ret` / `errcode`。
-- 只有发送成功的文本才写进 `history.log`。
+- 没有被规范接受的发送（窗口被拒、`ret=-2`、空正文、`{}`、`null`、数组、缺少 `ret`、传输失败）写进 **outbox.json**，**exit 3 (QUEUED)**。**exit 0** 只表示规范上的 API 接受：JSON 对象里整数 `ret == 0`，若带 `errcode` 则也必须是整数 0。这不等于手机已经显示。
+- 转发器把进程启动后看到的第一个入站时间当作基线，不会因此补发。之后入站时间变了，才按顺序补发带 `v == 2` 的新队列。启动、部署、重启都不会自动重放旧积压。没有 `v == 2` 的历史条目留在文件里，默认不发；只有单独把 `WECHAT_OUTBOX_REPLAY_HISTORICAL=1` 打开才允许发它们。
+- 补发遇到第一条失败或无法判断的结果就停，不删除该条，也不删除它后面的条目。
+- 判断成功不能看 HTTP 状态码：iLink 拒绝时也常返回 200。空正文、`{}` 和缺 `ret` 按失败关闭，不再当成成功后出队。
+- 只有规范接受的文本才写进 `history.log`。
 
 ### 24 小时推送窗口 + keep-alive nudge + 免打扰
 微信只允许 bot 在用户最后一次发言后的一段时间内主动发消息（实测 11h 能发、35h 失败，按 ~24h 处理）。
@@ -165,7 +166,7 @@ cp .env.example .env            # 先空着 webhook，下一步再填
 - `credentials.json` 拿到就能以你的 ClawBot 身份收发消息。泄露了：在微信里解绑 ClawBot，再重新 `bind.py`。
 
 ## 踩过的坑
-1. **24h 推送窗口**：用户太久没说话，bot 主动发会被拒，而且 **HTTP 仍是 200**，只能看 `ret` / `errcode`。→ outbox 排队 + nudge。
+1. **24h 推送窗口**：用户太久没说话，bot 主动发会被拒，而且 **HTTP 仍是 200**。规范接受要看 JSON 里的整数 `ret == 0`（`errcode` 若存在也必须是 0）。空正文、`{}`、`null`、数组、缺 `ret` 都不能当成成功。`ret == 0` 也只表示 API 收下了，手机仍可能看不到。`ret=-2` 一类明确拒绝会留在队列里，原因并未因此查清。→ 失败关闭 + 旧积压默认不重放 + nudge。
 2. **nudge 半夜发 / 被免打扰吞掉**：第一版只在 18–23h 发、免打扰就跳过，结果窗口整段落在凌晨时直接错过。→ 改成提前到免打扰开始前 30 分钟发（最早 12h）。
 3. **回 "1" 续期，agent 却反问"1 是什么意思"**：→ `context_note` 告诉它这是续期。
 4. **连发几条，agent 回了好几轮、互相打架**：→ pending.json 批处理。停顿时间调过 60s → 25s → 20s → 3s，最大等待 300s → 60s；
@@ -178,7 +179,7 @@ cp .env.example .env            # 先空着 webhook，下一步再填
 10. **机器重启后转发器没了**：`run_forward.sh` 只管 `forward.py` 崩溃，管不了自己被杀。→ 每 15 分钟的外层 watchdog + 心跳文件。
 11. **重复投递**：同一条消息可能来两次。→ `message_id` 去重。
 12. **时区**：box 在 Asia/Taipei，免打扰按北京时间——都是 UTC+8，但代码里显式用 `Asia/Shanghai`，换机器也不会错。
-13. **补发和 nudge 都不带 `context_token`**（`context_token=""`），旧 token 隔了很久可能失效；实测不带也能发。
+13. **补发和 nudge 都不带 `context_token`**（`context_token=""`），初次 `send_or_queue` 仍按调用方传入的 token（默认用已保存的）。这里没有证据证明缺 token 就是 `ret=-2` 的原因，所以补发仍不带 token。
 14. **绑定**：二维码会过期（自动刷新，最多 `MAX_REFRESH` 次）；可能返回 `scaned_but_redirect`，要改用 `redirect_host`；可能要求输入手机上显示的数字（`need_verifycode`）。
 15. **Webhook 重试**：4xx（除 408/429）是配置错（URL / key 不对），重试没用，直接放弃并保留 pending，修好配置后重启即可补发。
 
@@ -193,9 +194,13 @@ webhook routine, so WeChat becomes a chat front-end for your agent.
   WeChat CDN, buffers messages in a disk-backed `pending.json`, and POSTs them as **one batch** once you pause (3s) or after 60s,
   together with the last 40 lines of a stitched `history.log` (each webhook run is a fresh agent run).
 - **Outbound**: the agent replies with `send.py "text" --reply-to-ms <trigger_ms>`. If you've sent something newer
-  meanwhile, it exits **4 (SUPERSEDED)** and sends nothing — replies are interruptible. If WeChat refuses (the ~24h
-  push window since your last message has closed; note iLink still returns HTTP 200, check `ret`/`errcode`), the text
-  is queued in `outbox.json` (exit **3**) and auto-sent right after you next write.
+  meanwhile, it exits **4 (SUPERSEDED)** and sends nothing — replies are interruptible. Exit **0** is only canonical
+  API acceptance: a JSON object with integer `ret == 0` and, if present, integer `errcode == 0`. HTTP 200 is not
+  enough. Empty bodies, `{}`, `null`, arrays, and a missing `ret` fail closed and stay queued (exit **3**), as do
+  non-zero codes such as `ret=-2`. `ret == 0` means the API accepted the call, not that the phone displayed it.
+  Items this version queues (`v == 2`) can flush after a new inbound timestamp. The timestamp already present at
+  startup is a baseline, so startup, deploy, and restart do not flush. Older backlog stays on disk and is not sent
+  unless `WECHAT_OUTBOX_REPLAY_HISTORICAL=1`.
 - **Keep-alive nudge**: one short "reply 1 to renew" message 18–23h after your last message, never during quiet
   hours (00:00–07:59 Beijing); if that slot is all quiet hours, it's sent early (≥12h) 30 min before quiet hours start.
   A bare "1" gets a `context_note` so the agent just acks it.

@@ -5,9 +5,12 @@ Usage: python3 send.py "text" [--to USER_ID] [--no-context] [--app] [--reply-to-
   message since, nothing is sent and the exit code is 4 (SUPERSEDED): the newer run will answer.
 --app: prefix APP_PREFIX (default "[grok bot] ") for pushes not triggered by the WeChat webhook
   (reminders, routine output), so the user can tell them apart from replies.
-If WeChat refuses (the ~24h window since the user's last message has closed), the text is queued in
-outbox.json (exit code 3) and forward.py sends it automatically the next time the user writes.
-Exit codes: 0 sent, 3 queued, 4 superseded."""
+Exit 0 only when the sendmessage body is canonical API acceptance (integer ret == 0, and integer
+errcode == 0 when that field is present). That is not proof the phone displayed the message.
+Anything else — refusal, ret=-2, empty/{}/null/list/missing ret, or a transport error — is queued
+in outbox.json (exit code 3). forward.py may later send items this version queued, after a new
+inbound. It does not replay older backlog unless WECHAT_OUTBOX_REPLAY_HISTORICAL=1.
+Exit codes: 0 accepted by API, 3 queued, 4 superseded."""
 import argparse, sys
 import outbox
 from config import APP_PREFIX, OWNER_NAME

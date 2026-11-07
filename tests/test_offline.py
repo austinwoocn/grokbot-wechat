@@ -54,7 +54,7 @@ class BatcherTest(unittest.TestCase):
 class NudgeTest(unittest.TestCase):
     def setUp(self):
         self.calls = []
-        outbox.send_text = lambda text, **kw: (self.calls.append(text) or ("{}", False))
+        outbox.send_text = lambda text, **kw: (self.calls.append(text) or ('{"ret":0}', False))
     def state(self, last):
         ilink.save_state({"last_inbound_ms": int(last * 1000)})
     def test_normal_window_nudges_at_18h(self):

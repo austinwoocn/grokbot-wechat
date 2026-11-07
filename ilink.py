@@ -42,15 +42,43 @@ def send_text(text, to=None, context_token=None):
            "message_type": 2, "message_state": 2, "item_list": [{"type": 1, "text_item": {"text": text}}]}
     if context_token: msg["context_token"] = context_token
     resp = post("ilink/bot/sendmessage", {"msg": msg})
-    # iLink answers HTTP 200 even on refusal; success = no non-zero ret / errcode in the JSON body.
-    try:
-        r = json.loads(resp) if resp.strip() else {}
-        ok = not (isinstance(r, dict) and (r.get("ret") or r.get("errcode")))
-    except ValueError:
-        ok = False
-    if ok:
-        try:
-            import history; history.append(history.grok_line(text))
-        except Exception:
-            pass
+    # HTTP 200 is not acceptance. Only send_accepted is, and that is not device receipt.
+    note_sent(text, resp)
     return resp, bool(context_token)
+
+def send_accepted(resp):
+    """Canonical sendmessage API acceptance. This is not device receipt.
+
+    Documented success body is {"ret": 0, "errmsg": ""}. Accept only a JSON
+    object whose ret is the integer 0. When errcode is present it must be the
+    integer 0 as well. ret == 0 means the API accepted the request; the phone
+    may still never show the message.
+
+    Fail closed: empty body, {}, null, arrays, non-JSON, a missing ret,
+    booleans, and any non-zero ret or errcode (including ret=-2) are not
+    acceptance. Callers must keep those messages queued.
+    """
+    if not isinstance(resp, str) or not resp.strip():
+        return False
+    try:
+        body = json.loads(resp)
+    except ValueError:
+        return False
+    if not isinstance(body, dict) or "ret" not in body:
+        return False
+    if type(body.get("ret")) is not int or body.get("ret") != 0:
+        return False
+    if "errcode" in body and (type(body.get("errcode")) is not int or body.get("errcode") != 0):
+        return False
+    return True
+
+def note_sent(text, resp):
+    """Append history only after canonical API acceptance. Never on an ambiguous body."""
+    if not send_accepted(resp):
+        return False
+    try:
+        import history
+        history.append(history.grok_line(text))
+    except Exception:
+        return False
+    return True
