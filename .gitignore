@@ -14,6 +14,10 @@ pending.json
 pending.json.tmp
 outbox.json
 outbox.json.tmp
+outbox.json.lock
+outbox.json.preserved.*
+outbox.json.unqueued.*
+.outbox-*.tmp
 forward_seen.json
 history.log
 forward.heartbeat

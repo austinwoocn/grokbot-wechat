@@ -210,15 +210,24 @@ def handle(msgs, batcher):
             json.dump(seen, open(SEEN, "w"))
 
 def outbox_loop():
-    """Flush queued sends right after the user writes; nudge near window end."""
-    seen_last = None
+    """Flush queued sends after a new inbound; nudge near window end.
+
+    The first inbound timestamp observed after this process starts is a baseline,
+    not a new message. Startup, deploy, and restart must not flush the backlog.
+    A later change may flush items this code queued; historical items stay put
+    unless outbox replay was separately authorized.
+    """
+    seen_last, primed = None, False
     while True:
         try:
             last = outbox.last_inbound_s()
-            if last and last != seen_last:
-                seen_last = last
-                time.sleep(3)           # let the user's message register first
-                outbox.flush()
+            if not primed:
+                seen_last, primed = last, True
+            else:
+                flush_now, seen_last = outbox.note_inbound(last, seen_last)
+                if flush_now:
+                    time.sleep(3)           # let the user's message register first
+                    outbox.flush()
             outbox.maybe_nudge()
         except Exception as e:
             log.warning("outbox loop error: %s: %s", type(e).__name__, e)
